@@ -1,4 +1,4 @@
-# Enhancing Lightweight Models for Efficient Sensor-based Human Activity Recognition
+# Enhancing Lightweight Models for Efficient Sensor-Based Human Activity Recognition
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.13.0-orange.svg)](https://www.tensorflow.org/)

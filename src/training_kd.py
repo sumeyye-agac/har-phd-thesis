@@ -120,7 +120,7 @@ def train_kd(
     with tf.device(device):
         distiller = Distiller(student=student_clone, teacher=teacher, architecture=architecture)
         distiller.compile(
-            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=DEFAULT_LEARNING_RATE, beta_1=0.9),
+            optimizer=tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE, beta_1=0.9),
             metrics=[SparseCategoricalAccuracy(name="accuracy")],
             student_loss_fn=SparseCategoricalCrossentropy(from_logits=True),
             distillation_loss_fn=KLDivergence(),

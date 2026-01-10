@@ -70,7 +70,7 @@ def train_model(model, X_train, y_train, X_val, y_val, save_path=None,
     
     with device_context:
         model_clone.compile(
-            optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=DEFAULT_LEARNING_RATE, beta_1=0.9),
+            optimizer=tf.keras.optimizers.Adam(learning_rate=DEFAULT_LEARNING_RATE, beta_1=0.9),
             loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy")]
         )
