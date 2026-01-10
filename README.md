@@ -1,7 +1,10 @@
-# Boosting Lightweight Human Activity Recognition on Edge Devices With Knowledge Distillation and Attention Mechanisms
+# Enhancing Lightweight Models for Efficient Sensor-based Human Activity Recognition
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.13.0-orange.svg)](https://www.tensorflow.org/)
+
+**Keywords:**  
+`human-activity-recognition` `har` `lightweight-models` `attention-mechanism` `knowledge-distillation` `model-compression` `edge-computing` `phd-thesis` `deepconvlstm` `sensor-based` `deep-learning` `machine-learning` `tensorflow` `python` `quantization` `pruning` `tflite` `opportunity-dataset` `squeezenet` `phd`
 
 > **PhD Thesis Implementation**  
 > Author: **Sumeyye Agac**  
@@ -262,4 +265,3 @@ Agac, S. *Boosting Lightweight Human Activity Recognition on Edge Devices With K
   program     = {PhD Program in Computer Engineering}  
 }
 ```
-
