@@ -60,7 +60,29 @@ The combined use of attention and knowledge distillation significantly improves 
 
 ---
 
-## Model Naming Conventions
+## Notation
+
+**Model Variants:**
+- **OM** - Original Model (baseline, full-size)
+- **LM** - Lightweight Model (smallest)
+- **MM** - Mid-size Model (medium)
+
+**Attention Mechanisms:**
+- **CH_ATT** - Channel Attention
+- **SP_ATT** - Spatial Attention
+- **CBAM** - Channel-Spatial Attention (Combined)
+
+**Knowledge Distillation Types:**
+- **RB-KD** - Response-Based Knowledge Distillation
+- **RB-KD-Att** - RB-KD with Attention mechanisms
+- **RAB-KD-Att** - Response-Attention-Based KD with Attention
+
+**Compression Types:**
+- **TFLite** - TensorFlow Lite conversion
+- **Quantized** - Quantization (INT8)
+- **Pruned** - Model pruning (sparsity)
+
+**Model Naming Conventions:**
 
 Models follow a consistent naming pattern: `{Variant}-Att-{Type}-{Params}-{Layers}` for attention models, `{Variant}-{KD-Type}-T{Temp}-A{Alpha}-{AttConfig}` for KD models, and `OM-{CompressionType}` for compression models. See `src/model_naming.py` for details.
 
@@ -229,22 +251,6 @@ rm -rf models_saved/tflite/*
 # Delete processed data (will be regenerated)
 rm data/processed/opportunity_splits.pkl
 ```
-
----
-
-## Results
-
-All evaluation results are saved to CSV files in the `results/` directory:
-
-- `baseline_models.csv` - Baseline model evaluations
-- `grid_search_om_att.csv` - OM-Att grid search results
-- `grid_search_lm_att.csv` - LM-Att grid search results
-- `grid_search_mm_att.csv` - MM-Att grid search results
-- `grid_search_rbkd.csv` - RB-KD grid search results
-- `grid_search_rbkd_att.csv` - RB-KD-Att grid search results
-- `grid_search_rabkd_att.csv` - RAB-KD-Att grid search results
-- `best_models_summary.csv` - Best model selections
-- `evaluation_all.csv` - Complete evaluation of all models
 
 ---
 

@@ -422,6 +422,9 @@ def train_and_evaluate_model(
     # Build model
     model = model_builder()
     
+    # Print model architecture
+    model.summary()
+    
     # Train with timing
     train_start = time.time()
     history, training_info = train_model(
