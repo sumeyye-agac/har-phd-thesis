@@ -20,8 +20,8 @@ from tensorflow.keras import backend as K
 
 
 class ChannelAttention(Layer):
-    def __init__(self, filters, ratio, name=None):
-        super(ChannelAttention, self).__init__(name=name)
+    def __init__(self, filters, ratio, name=None, **kwargs):
+        super(ChannelAttention, self).__init__(name=name, **kwargs)
         self.filters = filters
         self.ratio = ratio
         self.attention = None
@@ -58,11 +58,26 @@ class ChannelAttention(Layer):
 
     def get_attention(self):
         return self.attention
+    
+    def get_config(self):
+        config = super(ChannelAttention, self).get_config()
+        config.update({
+            'filters': self.filters,
+            'ratio': self.ratio,
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        # Remove trainable and other Layer base class params if present
+        layer_config = {k: v for k, v in config.items() 
+                       if k not in ['trainable', 'dtype', 'name']}
+        return cls(**layer_config)
 
 
 class SpatialAttention(Layer):
-    def __init__(self, kernel_size, name=None):
-        super(SpatialAttention, self).__init__(name=name)
+    def __init__(self, kernel_size, name=None, **kwargs):
+        super(SpatialAttention, self).__init__(name=name, **kwargs)
         self.kernel_size = kernel_size
         self.attention = None
 
@@ -86,3 +101,17 @@ class SpatialAttention(Layer):
 
     def get_attention(self):
         return self.attention
+    
+    def get_config(self):
+        config = super(SpatialAttention, self).get_config()
+        config.update({
+            'kernel_size': self.kernel_size,
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        # Remove trainable and other Layer base class params if present
+        layer_config = {k: v for k, v in config.items() 
+                       if k not in ['trainable', 'dtype', 'name']}
+        return cls(**layer_config)
