@@ -12,6 +12,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Dict, List, Tuple, Any, Optional, Callable
 from datetime import datetime
+from logging import Logger
 
 from src.config import (
     MODEL_SEED, TRAINING_TF_SEED, TRAINING_NP_SEED,
@@ -25,6 +26,7 @@ from src.config import (
 STANDARD_CSV_FIELDNAMES = [
     # Basic info
     'model_name',
+    'model_type',  # TF or TFLite (optional, added by evaluate_all.py and evaluate_baseline_models.py)
     'timestamp',
     'device',  # GPU/CPU
     'variant',  # OM, LM, MM
@@ -79,9 +81,24 @@ STANDARD_CSV_FIELDNAMES = [
     'model_size_kb',
     'model_size_gzipped_kb',  # Gzipped model size
     'parameter_count',
+    'parameter_count_trainable',
+    'parameter_count_non_trainable',
     'mac_operations_tf',      # MAC operations for TF models
     'mac_operations_tflite',   # MAC operations for TFLite models
     'flops',                   # FLOPs (for TF models)
+    
+    # Compression info
+    'compression_type',        # Lite, DRQ, FQ, CP, PDP, N/A
+    'compression_sparsity',    # Sparsity ratio for pruned models (0.5, 0.8, N/A)
+    'quantization_type',       # INT8, Float16, None, N/A
+    
+    # Attention details
+    'attention_type',          # CH_ATT, SP_ATT, CBAM, N/A
+    
+    # Efficiency metrics
+    'accuracy_per_mb',         # Test accuracy per MB (model efficiency)
+    'f1_per_mb',               # Test F1 per MB (model efficiency)
+    'inference_time_ms',       # Inference time in milliseconds (optional, added by evaluate_all.py)
 ]
 
 
@@ -109,18 +126,36 @@ def confusion_matrix_to_string(cm):
     return str(cm).replace('\n', ' ')
 
 
+def get_model_param_counts(model):
+    """Get total, trainable, and non-trainable parameter counts for a TF model."""
+    try:
+        total = model.count_params()
+        trainable = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+        non_trainable = total - trainable
+        return total, trainable, non_trainable
+    except Exception as e:
+        # Fallback if calculation fails
+        total = model.count_params()
+        return total, None, None
+
+
 def extract_model_metadata(model_name: str) -> Dict[str, Any]:
     """
     Extract model metadata from model name.
     
     Returns:
-        Dictionary with variant, has_attention, has_kd, kd_type
+        Dictionary with variant, has_attention, has_kd, kd_type, attention_type,
+        compression_type, compression_sparsity, quantization_type
     """
     metadata = {
         'variant': 'Unknown',
         'has_attention': False,
         'has_kd': False,
         'kd_type': 'N/A',
+        'attention_type': 'N/A',
+        'compression_type': 'N/A',
+        'compression_sparsity': 'N/A',
+        'quantization_type': 'N/A',
     }
     
     # Variant detection
@@ -134,6 +169,15 @@ def extract_model_metadata(model_name: str) -> Dict[str, Any]:
     # Attention detection
     if 'Att' in model_name:
         metadata['has_attention'] = True
+        # Attention type detection
+        if 'CBAM' in model_name or 'cbam' in model_name.lower():
+            metadata['attention_type'] = 'CBAM'
+        elif 'CH_ATT' in model_name or 'CHATT' in model_name or 'ch_att' in model_name.lower():
+            metadata['attention_type'] = 'CH_ATT'
+        elif 'SP_ATT' in model_name or 'SPATT' in model_name or 'sp_att' in model_name.lower():
+            metadata['attention_type'] = 'SP_ATT'
+        else:
+            metadata['attention_type'] = 'Unknown'
     
     # Knowledge Distillation detection
     if 'KD' in model_name or 'BKD' in model_name:
@@ -146,6 +190,25 @@ def extract_model_metadata(model_name: str) -> Dict[str, Any]:
             metadata['kd_type'] = 'RB-KD'
         elif 'RAB-KD' in model_name or 'RABKD' in model_name or 'RA-BKD' in model_name:
             metadata['kd_type'] = 'RAB-KD'
+    
+    # Compression type detection (TFLite models)
+    if '-Lite' in model_name or model_name.endswith('Lite.tflite'):
+        metadata['compression_type'] = 'Lite'
+        metadata['quantization_type'] = 'None'
+    elif '-DRQ' in model_name or model_name.endswith('DRQ.tflite'):
+        metadata['compression_type'] = 'DRQ'
+        metadata['quantization_type'] = 'INT8'
+    elif '-FQ' in model_name or model_name.endswith('FQ.tflite'):
+        metadata['compression_type'] = 'FQ'
+        metadata['quantization_type'] = 'Float16'
+    elif '-CP' in model_name or model_name.endswith('CP.tflite'):
+        metadata['compression_type'] = 'CP'
+        metadata['compression_sparsity'] = '0.5'
+        metadata['quantization_type'] = 'None'
+    elif '-PDP' in model_name or model_name.endswith('PDP.tflite'):
+        metadata['compression_type'] = 'PDP'
+        metadata['compression_sparsity'] = '0.8'
+        metadata['quantization_type'] = 'None'
     
     return metadata
 
@@ -176,6 +239,8 @@ def save_grid_search_result(
     model_size_kb: Optional[float] = None,
     model_size_gzipped_kb: Optional[float] = None,
     parameter_count: Optional[int] = None,
+    parameter_count_trainable: Optional[int] = None,
+    parameter_count_non_trainable: Optional[int] = None,
     mac_operations_tf: Optional[int] = None,
     mac_operations_tflite: Optional[int] = None,
     flops: Optional[int] = None,
@@ -203,22 +268,21 @@ def save_grid_search_result(
     Uses STANDARD_CSV_FIELDNAMES for consistency.
     """
     if timestamp is None:
-        timestamp = datetime.now().strftime("%d %m %Y, %H:%M:%S")
+        timestamp = datetime.now().strftime("%d-%m-%Y, %H:%M:%S")
     
     if device is None:
         device = get_active_device()
     
     # Auto-detect model metadata if not provided
-    if variant is None or has_attention is None or has_kd is None or kd_type is None:
-        metadata = extract_model_metadata(model_name)
-        if variant is None:
-            variant = metadata['variant']
-        if has_attention is None:
-            has_attention = metadata['has_attention']
-        if has_kd is None:
-            has_kd = metadata['has_kd']
-        if kd_type is None:
-            kd_type = metadata['kd_type']
+    metadata = extract_model_metadata(model_name)
+    if variant is None:
+        variant = metadata['variant']
+    if has_attention is None:
+        has_attention = metadata['has_attention']
+    if has_kd is None:
+        has_kd = metadata['has_kd']
+    if kd_type is None:
+        kd_type = metadata['kd_type']
     
     # Prepare row with all standard fields
     row = {
@@ -228,7 +292,11 @@ def save_grid_search_result(
         'variant': variant,
         'has_attention': str(has_attention),
         'has_kd': str(has_kd),
-        'kd_type': kd_type,
+        'kd_type': kd_type or 'N/A',
+        'attention_type': metadata.get('attention_type', 'N/A'),
+        'compression_type': metadata.get('compression_type', 'N/A'),
+        'compression_sparsity': metadata.get('compression_sparsity', 'N/A'),
+        'quantization_type': metadata.get('quantization_type', 'N/A'),
         'val_accuracy': f"{val_accuracy:.6f}",
     }
     
@@ -298,12 +366,32 @@ def save_grid_search_result(
         row['model_size_gzipped_kb'] = f"{model_size_gzipped_kb:.2f}"
     if parameter_count is not None:
         row['parameter_count'] = str(parameter_count)
+    if parameter_count_trainable is not None:
+        row['parameter_count_trainable'] = str(parameter_count_trainable)
+    if parameter_count_non_trainable is not None:
+        row['parameter_count_non_trainable'] = str(parameter_count_non_trainable)
     if mac_operations_tf is not None:
         row['mac_operations_tf'] = str(mac_operations_tf)
     if mac_operations_tflite is not None:
         row['mac_operations_tflite'] = str(mac_operations_tflite)
     if flops is not None:
         row['flops'] = str(flops)
+    
+    # Calculate and add efficiency metrics (accuracy and F1 per MB)
+    if model_size_kb is not None and test_accuracy is not None:
+        model_size_mb = model_size_kb / 1024.0
+        if model_size_mb > 0:
+            row['accuracy_per_mb'] = f"{test_accuracy / model_size_mb:.6f}"
+            if test_f1 is not None:
+                row['f1_per_mb'] = f"{test_f1 / model_size_mb:.6f}"
+            else:
+                row['f1_per_mb'] = 'N/A'
+        else:
+            row['accuracy_per_mb'] = 'N/A'
+            row['f1_per_mb'] = 'N/A'
+    else:
+        row['accuracy_per_mb'] = 'N/A'
+        row['f1_per_mb'] = 'N/A'
     
     # Read existing CSV if it exists
     file_exists = os.path.exists(csv_path)
@@ -371,6 +459,67 @@ def find_best_model_from_csv(csv_path: str, metric: str = 'val_accuracy') -> Opt
         reader = csv.DictReader(f)
         first_row = next(reader, None)
         return first_row
+
+
+def get_training_info_from_grid_search_csvs(model_name: str) -> Dict[str, Optional[str]]:
+    """
+    Search all grid search CSV files and training info JSON files for a model 
+    and return training info (best_epoch, total_epochs).
+    
+    Args:
+        model_name: Name of the model to search for (e.g., "OM-Att-CH-4-L1", "LM-RB-KD-T4-A05", "OM")
+    
+    Returns:
+        Dict with 'best_epoch' and 'total_epochs' if found, otherwise None values.
+    """
+    import json
+    
+    result = {
+        'best_epoch': None,
+        'total_epochs': None,
+    }
+    
+    # First, try to find in grid search CSV files
+    grid_search_csvs = [
+        "results/grid_search_om_att.csv",
+        "results/grid_search_lm_att.csv",
+        "results/grid_search_mm_att.csv",
+        "results/grid_search_rbkd.csv",
+        "results/grid_search_rbkd_att.csv",
+        "results/grid_search_rabkd_att.csv",
+    ]
+    
+    for csv_path in grid_search_csvs:
+        if not os.path.exists(csv_path):
+            continue
+        
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get('model_name') == model_name:
+                        result['best_epoch'] = row.get('best_epoch')
+                        result['total_epochs'] = row.get('total_epochs')
+                        return result
+        except Exception as e:
+            # Skip CSV if there's an error reading it
+            continue
+    
+    # If not found in CSV, try to find in training info JSON files (for baseline models)
+    from src.registry import tf_path
+    training_info_path = tf_path(model_name).replace('.h5', '_training_info.json')
+    if os.path.exists(training_info_path):
+        try:
+            with open(training_info_path, 'r') as f:
+                training_info = json.load(f)
+                result['best_epoch'] = str(training_info.get('best_epoch')) if training_info.get('best_epoch') is not None else None
+                result['total_epochs'] = str(training_info.get('total_epochs')) if training_info.get('total_epochs') is not None else None
+                return result
+        except Exception as e:
+            # Skip JSON if there's an error reading it
+            pass
+    
+    return result
 
 
 def train_and_evaluate_model(
@@ -511,6 +660,7 @@ def run_single_experiment(
     csv_path: Optional[str] = None,
     experiment_num: Optional[int] = None,
     total_experiments: Optional[int] = None,
+    logger: Optional[Logger] = None,
 ):
     """
     Run a single grid search experiment for attention models.
@@ -554,13 +704,19 @@ def run_single_experiment(
         layer_positions=layer_positions,
     )
     
-    print(f"  [{experiment_num}/{total_experiments}] {model_name}...", end=" ", flush=True)
+    if logger:
+        logger.info(f"[{experiment_num}/{total_experiments}] {model_name}...")
+    else:
+        print(f"  [{experiment_num}/{total_experiments}] {model_name}...", end=" ", flush=True)
     
     model_path = os.path.join(TF_DIR, f"{model_name}.h5")
     
     # Check if already trained
     if os.path.exists(model_path):
-        print("SKIPPED (already exists)")
+        if logger:
+            logger.info(f"SKIPPED (already exists): {model_name}")
+        else:
+            print("SKIPPED (already exists)")
         # Still evaluate and save to CSV
         try:
             model = load_model_tf(f"{model_name}.h5")
@@ -593,7 +749,10 @@ def run_single_experiment(
             
             return
         except (OSError, IOError, ValueError) as e:
-            print(f"⚠ Corrupted model file detected, will retrain: {e}")
+            if logger:
+                logger.warning(f"Corrupted model file detected, will retrain: {e}")
+            else:
+                print(f"⚠ Corrupted model file detected, will retrain: {e}")
             os.remove(model_path)
             # Fall through to training below
     
@@ -638,6 +797,11 @@ def run_single_experiment(
         # Get model for parameter count
         model = model_builder()
         
+        # Calculate trainable and non-trainable parameters
+        param_total = model.count_params()
+        param_trainable = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+        param_non_trainable = param_total - param_trainable
+        
         # Get test confusion matrix
         test_cm = test_metrics.get('confusion_matrix') if test_metrics else None
         
@@ -671,7 +835,9 @@ def run_single_experiment(
             train_confusion_matrix=train_cm,
             # Model info
             model_size_kb=get_model_size_kb(model_path),
-            parameter_count=model.count_params(),
+            parameter_count=param_total,
+            parameter_count_trainable=param_trainable,
+            parameter_count_non_trainable=param_non_trainable,
             device=get_active_device(),
             # Training info
             total_epochs=training_info['total_epochs'],
@@ -686,13 +852,19 @@ def run_single_experiment(
             patience=training_info.get('patience'),
         )
         
-        print(f"✓ Val Acc: {val_acc:.4f}")
+        if logger:
+            logger.info(f"Val Acc: {val_acc:.4f}")
+        else:
+            print(f"✓ Val Acc: {val_acc:.4f}")
         
         # Clear memory
         cleanup_memory(model)
         
     except Exception as e:
-        print(f"✗ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        if logger:
+            logger.error(f"ERROR: {e}", exc_info=True)
+        else:
+            print(f"✗ ERROR: {e}")
+            import traceback
+            traceback.print_exc()
         cleanup_memory()

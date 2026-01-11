@@ -25,7 +25,7 @@ setup_gpu_environment(enable_memory_growth=True, set_seed=True, set_floatx=True,
 import tensorflow as tf
 from itertools import product
 
-from src.data_opportunity import load_opportunity_splits
+from src.data_opportunity import load_opportunity_splits, load_and_prepare_opportunity_data
 from src.grid_search_utils import set_seeds, save_grid_search_result, get_active_device
 from src.model_naming import generate_attention_model_name, generate_kd_model_name
 from src.model_io import load_model_tf
@@ -45,7 +45,11 @@ from src.utils_resources import get_model_size as get_model_size_kb
 from src.cli_parser import parse_args
 from src.attention_utils import create_attention_lists, get_attention_config_string
 from src.memory_utils import cleanup_memory, cleanup_on_error
+from src.logger import setup_logger
+from src.gpu_utils import setup_gpu_and_log_device
 
+# Setup logger
+logger = setup_logger(__name__)
 
 # Parser configuration
 PARSER_CONFIG = {
@@ -114,7 +118,7 @@ def main():
     spatial_kernels = args.get('spatial_kernels', ATT_GRID_SPATIAL_KERNELS)
     layer_positions_options = args.get('layer_positions', ATT_GRID_LAYER_POSITIONS)
     
-    print("=== Chapter 6: LM RB-KD-Att Grid Search ===")
+    logger.info("=== Chapter 6: LM RB-KD-Att Grid Search ===")
     
     # Generate all attention configs based on selected attention types
     attention_configs = []
@@ -158,53 +162,23 @@ def main():
     attention_count = ch_att_count + sp_att_count + cbam_count
     total_experiments = len(temperatures) * len(alphas) * len(attention_configs)
     
-    print(f"Total experiments: {total_experiments} ({len(temperatures)} temperatures × {len(alphas)} alphas × {attention_count} attention configs)")
-    print(f"Configuration: ch_att={run_ch_att}, sp_att={run_sp_att}, cbam={run_cbam}")
-    print(f"  temperatures={temperatures}, alphas={alphas}")
-    print(f"  channel_ratios={channel_ratios}, spatial_kernels={spatial_kernels}, layer_positions={layer_positions_options}")
-    print()
+    logger.info(f"Total experiments: {total_experiments} ({len(temperatures)} temperatures × {len(alphas)} alphas × {attention_count} attention configs)")
+    logger.info(f"Configuration: ch_att={run_ch_att}, sp_att={run_sp_att}, cbam={run_cbam}")
+    logger.info(f"  temperatures={temperatures}, alphas={alphas}")
+    logger.info(f"  channel_ratios={channel_ratios}, spatial_kernels={spatial_kernels}, layer_positions={layer_positions_options}")
     
-    # Enable GPU memory growth
-    try:
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print(f"GPU memory growth enabled: {len(gpus)} GPU(s)")
-        else:
-            print("No GPU found, using CPU")
-    except Exception as e:
-        print(f"Could not set GPU memory growth: {e}")
+    # Setup GPU and log device info
+    setup_gpu_and_log_device(logger)
     
-    # Check available devices and active device
-    print(f"TensorFlow devices: {tf.config.list_physical_devices()}")
-    test_tensor = tf.constant([1.0])
-    print(f"Active device: {test_tensor.device}")
-    print()
-    
-    # Load data
-    print("Loading Opportunity dataset splits...")
-    X_train, y_train, X_val, y_val, X_test, y_test = load_opportunity_splits()
-    
-    # Add channel dimension
-    X_train = np.expand_dims(X_train, -1)
-    X_val = np.expand_dims(X_val, -1)
-    X_test = np.expand_dims(X_test, -1)
-    
-    num_classes = len(np.unique(y_train))
-    input_shape = X_train.shape[1:]
-    
-    print(f"Data shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
-    print(f"Number of classes: {num_classes}")
-    print()
+    # Load and prepare data
+    X_train, y_train, X_val, y_val, X_test, y_test, input_shape, num_classes = load_and_prepare_opportunity_data(logger)
     
     # Create results directory
     os.makedirs("results", exist_ok=True)
     csv_path = "results/grid_search_rbkd_att.csv"
     
-    print(f"Starting grid search: {total_experiments} experiments")
-    print(f"Results will be saved to: {csv_path}")
-    print()
+    logger.info(f"Starting grid search: {total_experiments} experiments")
+    logger.info(f"Results will be saved to: {csv_path}")
     
     experiment_count = 0
     
@@ -229,17 +203,17 @@ def main():
         )
         
         if experiment_count % 100 == 0:
-            print(f"  Progress: {experiment_count}/{total_experiments} experiments completed...")
+            logger.info(f"Progress: {experiment_count}/{total_experiments} experiments completed...")
             # Aggressive cleanup every 100 experiments
             cleanup_memory()
         
-        print(f"  [{experiment_count}/{total_experiments}] {model_name}...", end=" ", flush=True)
+        logger.info(f"[{experiment_count}/{total_experiments}] {model_name}...")
         
         model_path = os.path.join(TF_DIR, f"{model_name}.h5")
         
         # Check if already trained
         if os.path.exists(model_path):
-            print("SKIPPED")
+            logger.info("SKIPPED")
             # Periodic cleanup even for skipped models
             if experiment_count % 50 == 0:
                 cleanup_memory()
@@ -257,7 +231,7 @@ def main():
         teacher_path = os.path.join(TF_DIR, f"{teacher_name}.h5")
         
         if not os.path.exists(teacher_path):
-            print(f"SKIPPED (teacher {teacher_name} not found)")
+            logger.warning(f"SKIPPED (teacher {teacher_name} not found)")
             continue
         
         # Cleanup at start of each iteration
@@ -278,7 +252,7 @@ def main():
             time.sleep(0.1)  # Shorter delay for CPU
             
         except Exception as e:
-            print(f"✗ ERROR loading teacher: {e}")
+            logger.error(f"ERROR loading teacher: {e}", exc_info=True)
             cleanup_memory()
             continue
 
@@ -315,7 +289,7 @@ def main():
             time.sleep(0.05)  # Shorter delay for CPU
             
         except Exception as e:
-            print(f"✗ ERROR building student: {e}")
+            logger.error(f"ERROR building student: {e}", exc_info=True)
             cleanup_on_error(teacher)
             teacher = None
             time.sleep(0.1)  # Shorter delay on error
@@ -377,6 +351,10 @@ def main():
             val_acc, val_f1, val_prec, val_rec, val_cm = evaluate_tf_model(student_model, X_val, y_val, use_gpu=USE_GPU_EVALUATE)
             test_acc, test_f1, test_prec, test_rec, test_cm = evaluate_tf_model(student_model, X_test, y_test, use_gpu=USE_GPU_EVALUATE)
 
+            # Calculate parameter counts
+            from src.grid_search_utils import get_model_param_counts
+            param_total, param_trainable, param_non_trainable = get_model_param_counts(student_model)
+
             # Cleanup after evaluation
             cleanup_memory()
             
@@ -413,7 +391,9 @@ def main():
                 train_confusion_matrix=train_cm,
                 # Model info
                 model_size_kb=get_model_size_kb(model_path),
-                parameter_count=student_model.count_params(),
+                parameter_count=param_total,
+                parameter_count_trainable=param_trainable,
+                parameter_count_non_trainable=param_non_trainable,
                 device=get_active_device(),
                 # Training info
                 total_epochs=training_info.get('total_epochs'),
@@ -428,7 +408,7 @@ def main():
                 patience=training_info.get('patience') or KD_DEFAULT_PATIENCE,
             )
             
-            print(f"✓ Val Acc: {val_acc:.4f}")
+            logger.info(f"✓ Val Acc: {val_acc:.4f}")
             
             # Aggressive cleanup after CSV save
             cleanup_on_error(student_model)
@@ -436,9 +416,7 @@ def main():
             time.sleep(0.05)
             
         except Exception as e:
-            print(f"✗ ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"ERROR: {e}", exc_info=True)
             # Aggressive cleanup on error
             cleanup_on_error(teacher, student, student_model)
             teacher = None
@@ -450,9 +428,9 @@ def main():
     # Final cleanup (outside the for loop)
     cleanup_memory()
     
-    print(f"\n=== Grid Search Complete ===")
-    print(f"Results saved to: {csv_path}")
-    print(f"Models saved to: {TF_DIR}")
+    logger.info("=== Grid Search Complete ===")
+    logger.info(f"Results saved to: {csv_path}")
+    logger.info(f"Models saved to: {TF_DIR}")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ import numpy as np
 import tensorflow as tf
 from itertools import product, combinations
 
-from src.data_opportunity import load_opportunity_splits
+from src.data_opportunity import load_opportunity_splits, load_and_prepare_opportunity_data
 from src.grid_search_utils import (
     set_seeds, train_and_evaluate_model, save_grid_search_result, get_active_device,
 )
@@ -34,7 +34,11 @@ from src.utils_resources import get_model_size as get_model_size_kb
 from src.cli_parser import parse_args
 from src.attention_utils import create_attention_lists
 from src.memory_utils import cleanup_memory, periodic_cleanup
+from src.logger import setup_logger
+from src.gpu_utils import setup_gpu_and_log_device
 
+# Setup logger
+logger = setup_logger(__name__)
 
 # Parser configuration
 PARSER_CONFIG = {
@@ -96,7 +100,7 @@ def main():
     spatial_kernels = args.get('spatial_kernels', ATT_GRID_SPATIAL_KERNELS)
     layer_positions_options = args.get('layer_positions', ATT_GRID_LAYER_POSITIONS)
     
-    print("=== Chapter 4: OM-Att Grid Search ===")
+    logger.info("=== Chapter 4: OM-Att Grid Search ===")
     
     # Calculate total experiments based on selected attention types
     ch_att_count = len(channel_ratios) * len(layer_positions_options) if run_ch_att else 0
@@ -104,40 +108,22 @@ def main():
     cbam_count = len(channel_ratios) * len(spatial_kernels) * len(layer_positions_options) if run_cbam else 0
     total_experiments = ch_att_count + sp_att_count + cbam_count
     
-    print(f"Total experiments: {total_experiments} ({ch_att_count} CH + {sp_att_count} SP + {cbam_count} CBAM)")
-    print(f"Configuration: ch_att={run_ch_att}, sp_att={run_sp_att}, cbam={run_cbam}")
-    print(f"  channel_ratios={channel_ratios}, spatial_kernels={spatial_kernels}, layer_positions={layer_positions_options}")
-    print()
+    logger.info(f"Total experiments: {total_experiments} ({ch_att_count} CH + {sp_att_count} SP + {cbam_count} CBAM)")
+    logger.info(f"Configuration: ch_att={run_ch_att}, sp_att={run_sp_att}, cbam={run_cbam}")
+    logger.info(f"  channel_ratios={channel_ratios}, spatial_kernels={spatial_kernels}, layer_positions={layer_positions_options}")
 
-    # Check available devices and active device
-    print(f"TensorFlow devices: {tf.config.list_physical_devices()}")
-    test_tensor = tf.constant([1.0])
-    print(f"Active device: {test_tensor.device}")
-    print()
+    # Setup GPU and log device info
+    setup_gpu_and_log_device(logger)
     
-    # Load data
-    print("Loading Opportunity dataset splits...")
-    X_train, y_train, X_val, y_val, X_test, y_test = load_opportunity_splits()
-    
-    # Add channel dimension
-    X_train = np.expand_dims(X_train, -1)
-    X_val = np.expand_dims(X_val, -1)
-    X_test = np.expand_dims(X_test, -1)
-    
-    input_shape = X_train.shape[1:]
-    num_classes = len(np.unique(y_train))
-    
-    print(f"Data shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
-    print(f"Number of classes: {num_classes}")
-    print()
+    # Load and prepare data
+    X_train, y_train, X_val, y_val, X_test, y_test, input_shape, num_classes = load_and_prepare_opportunity_data(logger)
     
     # Create results directory
     os.makedirs("results", exist_ok=True)
     csv_path = "results/grid_search_om_att.csv"
     
-    print(f"Starting grid search: {total_experiments} experiments")
-    print(f"Results will be saved to: {csv_path}")
-    print()
+    logger.info(f"Starting grid search: {total_experiments} experiments")
+    logger.info(f"Results will be saved to: {csv_path}")
     
     experiment_count = 0
     
@@ -146,7 +132,7 @@ def main():
     # ============================================
     if run_ch_att:
         ch_att_experiments = len(channel_ratios) * len(layer_positions_options)
-        print(f"[1/3] Channel Attention Grid Search ({ch_att_experiments} experiments)")
+        logger.info(f"[1/3] Channel Attention Grid Search ({ch_att_experiments} experiments)")
         for ratio, layer_pos in product(channel_ratios, layer_positions_options):
             layers = [layer_pos]
             experiment_count += 1
@@ -157,17 +143,21 @@ def main():
                 layer_positions=layers,
             )
             
-            print(f"  [{experiment_count}/{total_experiments}] {model_name}...", end=" ", flush=True)
+            logger.info(f"[{experiment_count}/{total_experiments}] {model_name}...")
             
             # Check if already trained
             model_path = os.path.join(TF_DIR, f"{model_name}.h5")
             if os.path.exists(model_path):
-                print("SKIPPED (already exists)")
+                logger.info("SKIPPED (already exists)")
                 # Still evaluate and save to CSV
                 try:
                     model = load_model_tf(f"{model_name}.h5")
                     val_acc, _, _, _, val_cm = evaluate_tf_model(model, X_val, y_val, use_gpu=USE_GPU_EVALUATE)
                     test_acc, test_f1, test_prec, test_rec, test_cm = evaluate_tf_model(model, X_test, y_test, use_gpu=USE_GPU_EVALUATE)
+                    
+                    # Calculate parameter counts
+                    from src.grid_search_utils import get_model_param_counts
+                    param_total, param_trainable, param_non_trainable = get_model_param_counts(model)
                     
                     save_grid_search_result(
                         csv_path=csv_path,
@@ -183,7 +173,9 @@ def main():
                         test_precision=test_prec,
                         test_recall=test_rec,
                         model_size_kb=get_model_size_kb(model_path),
-                        parameter_count=model.count_params(),
+                        parameter_count=param_total,
+                        parameter_count_trainable=param_trainable,
+                        parameter_count_non_trainable=param_non_trainable,
                         device=get_active_device(),
                         val_confusion_matrix=val_cm,
                         test_confusion_matrix=test_cm,
@@ -194,7 +186,7 @@ def main():
                     
                     continue
                 except (OSError, IOError, ValueError) as e:
-                    print(f"⚠ Corrupted model file detected, will retrain: {e}")
+                    logger.warning(f"Corrupted model file detected, will retrain: {e}")
                     os.remove(model_path)
                     # Fall through to training below
             
@@ -282,7 +274,7 @@ def main():
                     patience=training_info.get('patience'),
                 )
                 
-                print(f"✓ Val Acc: {val_acc:.4f}")
+                logger.info(f"✓ Val Acc: {val_acc:.4f}")
                 
                 # Clear memory
                 cleanup_memory()
@@ -291,20 +283,18 @@ def main():
                 periodic_cleanup(experiment_count, interval=20, verbose=True)
                 
             except Exception as e:
-                print(f"✗ ERROR: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"ERROR: {e}", exc_info=True)
                 cleanup_memory()
                 continue
     else:
-        print("[1/3] Channel Attention Grid Search - SKIPPED (ch_att=false)")
+        logger.info("[1/3] Channel Attention Grid Search - SKIPPED (ch_att=false)")
     
     # ============================================
     # Spatial Attention Grid Search
     # ============================================
     if run_sp_att:
         sp_att_experiments = len(spatial_kernels) * len(layer_positions_options)
-        print(f"\n[2/3] Spatial Attention Grid Search ({sp_att_experiments} experiments)")
+        logger.info(f"[2/3] Spatial Attention Grid Search ({sp_att_experiments} experiments)")
         for kernel, layer_pos in product(spatial_kernels, layer_positions_options):
             layers = [layer_pos]
             experiment_count += 1
@@ -315,12 +305,12 @@ def main():
                 layer_positions=layers,
             )
             
-            print(f"  [{experiment_count}/{total_experiments}] {model_name}...", end=" ", flush=True)
+            logger.info(f"[{experiment_count}/{total_experiments}] {model_name}...")
             
             # Check if already trained
             model_path = os.path.join(TF_DIR, f"{model_name}.h5")
             if os.path.exists(model_path):
-                print("SKIPPED (already exists)")
+                logger.info("SKIPPED (already exists)")
                 continue
             
             # Create attention lists
@@ -362,6 +352,11 @@ def main():
                 
                 # Get test confusion matrix
                 test_cm = test_metrics.get('confusion_matrix') if test_metrics else None
+                
+                # Calculate parameter counts
+                from src.grid_search_utils import get_model_param_counts
+                model = model_builder()
+                param_total, param_trainable, param_non_trainable = get_model_param_counts(model)
                 
                 # Save to CSV
                 save_grid_search_result(
@@ -378,7 +373,9 @@ def main():
                     test_precision=test_metrics['precision'] if test_metrics else None,
                     test_recall=test_metrics['recall'] if test_metrics else None,
                     model_size_kb=get_model_size_kb(model_path),
-                    parameter_count=model_builder().count_params(),
+                    parameter_count=param_total,
+                    parameter_count_trainable=param_trainable,
+                    parameter_count_non_trainable=param_non_trainable,
                     device=get_active_device(),
                     total_epochs=training_info['total_epochs'],
                     best_epoch=training_info['best_epoch'],
@@ -387,7 +384,7 @@ def main():
                     test_confusion_matrix=test_cm,
                 )
                 
-                print(f"✓ Val Acc: {val_acc:.4f}")
+                logger.info(f"✓ Val Acc: {val_acc:.4f}")
                 
                 # Clear memory
                 cleanup_memory()
@@ -396,20 +393,18 @@ def main():
                 periodic_cleanup(experiment_count, interval=20, verbose=True)
                 
             except Exception as e:
-                print(f"✗ ERROR: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"ERROR: {e}", exc_info=True)
                 cleanup_memory()
                 continue
     else:
-        print("\n[2/3] Spatial Attention Grid Search - SKIPPED (sp_att=false)")
+        logger.info("[2/3] Spatial Attention Grid Search - SKIPPED (sp_att=false)")
     
     # ============================================
     # CBAM Grid Search
     # ============================================
     if run_cbam:
         cbam_experiments = len(channel_ratios) * len(spatial_kernels) * len(layer_positions_options)
-        print(f"\n[3/3] CBAM Grid Search ({cbam_experiments} experiments)")
+        logger.info(f"[3/3] CBAM Grid Search ({cbam_experiments} experiments)")
         for ratio, kernel, layer_pos in product(channel_ratios, spatial_kernels, layer_positions_options):
             layers = [layer_pos]
             experiment_count += 1
@@ -421,12 +416,12 @@ def main():
                 layer_positions=layers,
             )
             
-            print(f"  [{experiment_count}/{total_experiments}] {model_name}...", end=" ", flush=True)
+            logger.info(f"[{experiment_count}/{total_experiments}] {model_name}...")
             
             # Check if already trained
             model_path = os.path.join(TF_DIR, f"{model_name}.h5")
             if os.path.exists(model_path):
-                print("SKIPPED (already exists)")
+                logger.info("SKIPPED (already exists)")
                 continue
             
             # Create attention lists
@@ -469,6 +464,11 @@ def main():
                 
                 # Get test confusion matrix
                 test_cm = test_metrics.get('confusion_matrix') if test_metrics else None
+                
+                # Calculate parameter counts
+                from src.grid_search_utils import get_model_param_counts
+                model = model_builder()
+                param_total, param_trainable, param_non_trainable = get_model_param_counts(model)
                 
                 # Save to CSV
                 save_grid_search_result(
@@ -486,7 +486,9 @@ def main():
                     test_precision=test_metrics['precision'] if test_metrics else None,
                     test_recall=test_metrics['recall'] if test_metrics else None,
                     model_size_kb=get_model_size_kb(model_path),
-                    parameter_count=model_builder().count_params(),
+                    parameter_count=param_total,
+                    parameter_count_trainable=param_trainable,
+                    parameter_count_non_trainable=param_non_trainable,
                     device=get_active_device(),
                     total_epochs=training_info['total_epochs'],
                     best_epoch=training_info['best_epoch'],
@@ -495,7 +497,7 @@ def main():
                     test_confusion_matrix=test_cm,
                 )
                 
-                print(f"✓ Val Acc: {val_acc:.4f}")
+                logger.info(f"✓ Val Acc: {val_acc:.4f}")
                 
                 # Clear memory
                 cleanup_memory()
@@ -504,20 +506,18 @@ def main():
                 periodic_cleanup(experiment_count, interval=20, verbose=True)
                 
             except Exception as e:
-                print(f"✗ ERROR: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"ERROR: {e}", exc_info=True)
                 cleanup_memory()
                 continue
     else:
-        print("\n[3/3] CBAM Grid Search - SKIPPED (cbam=false)")
+        logger.info("[3/3] CBAM Grid Search - SKIPPED (cbam=false)")
     
     # Final cleanup
     cleanup_memory()
     
-    print(f"\n=== Grid Search Complete ===")
-    print(f"Results saved to: {csv_path}")
-    print(f"Models saved to: {TF_DIR}")
+    logger.info("=== Grid Search Complete ===")
+    logger.info(f"Results saved to: {csv_path}")
+    logger.info(f"Models saved to: {TF_DIR}")
 
 
 if __name__ == "__main__":

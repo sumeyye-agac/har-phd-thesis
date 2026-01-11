@@ -6,8 +6,11 @@ during grid search experiments.
 """
 
 import gc
+import logging
 import tensorflow as tf
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def cleanup_memory(*objects_to_delete):
@@ -41,11 +44,11 @@ def periodic_cleanup(experiment_count: int, interval: int = 20, verbose: bool = 
     """
     if experiment_count % interval == 0:
         if verbose:
-            print(f"\n  [Memory cleanup] Clearing session...", end=" ", flush=True)
+            logger.debug("Memory cleanup: Clearing session...")
         tf.keras.backend.clear_session()
         gc.collect()
         if verbose:
-            print("Done")
+            logger.debug("Memory cleanup: Done")
         return True
     return False
 

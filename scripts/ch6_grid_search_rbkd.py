@@ -14,6 +14,7 @@ All models are saved and results are written to results/grid_search_rbkd.csv
 """
 
 import os
+import gc
 import numpy as np
 
 # Set GPU memory growth BEFORE importing TensorFlow
@@ -23,7 +24,7 @@ setup_gpu_environment(enable_memory_growth=True)
 import tensorflow as tf
 from itertools import product
 
-from src.data_opportunity import load_opportunity_splits
+from src.data_opportunity import load_opportunity_splits, load_and_prepare_opportunity_data
 from src.grid_search_utils import set_seeds, save_grid_search_result, get_active_device
 from src.model_naming import generate_kd_model_name
 from src.model_io import load_model_tf
@@ -41,7 +42,11 @@ from src.config import (
 from src.utils_resources import get_model_size as get_model_size_kb
 from src.cli_parser import parse_args
 from src.memory_utils import cleanup_memory, cleanup_on_error, periodic_cleanup
+from src.logger import setup_logger
+from src.gpu_utils import setup_gpu_and_log_device
 
+# Setup logger
+logger = setup_logger(__name__)
 
 # Parser configuration
 PARSER_CONFIG = {
@@ -85,67 +90,36 @@ def main():
     temperatures = args.get('temperatures', KD_GRID_TEMPERATURES)
     alphas = args.get('alphas', KD_GRID_ALPHAS)
     
-    print("=== Chapter 6: LM RB-KD Grid Search ===")
+    logger.info("=== Chapter 6: LM RB-KD Grid Search ===")
     
     total_experiments = len(temperatures) * len(alphas)
     
-    print(f"Total experiments: {total_experiments} ({len(temperatures)} temperatures × {len(alphas)} alphas)")
-    print(f"Configuration: temperatures={temperatures}, alphas={alphas}")
-    print()
+    logger.info(f"Total experiments: {total_experiments} ({len(temperatures)} temperatures × {len(alphas)} alphas)")
+    logger.info(f"Configuration: temperatures={temperatures}, alphas={alphas}")
     
-    # Enable GPU memory growth
-    try:
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print(f"GPU memory growth enabled: {len(gpus)} GPU(s)")
-        else:
-            print("No GPU found, using CPU")
-    except Exception as e:
-        print(f"Could not set GPU memory growth: {e}")
-    
-    # Check available devices and active device
-    print(f"TensorFlow devices: {tf.config.list_physical_devices()}")
-    test_tensor = tf.constant([1.0])
-    print(f"Active device: {test_tensor.device}")
-    print()
+    # Setup GPU and log device info
+    setup_gpu_and_log_device(logger)
     
     # Check teacher model
     if not exists_tf("OM"):
-        raise FileNotFoundError(
-            "Teacher model OM not found. Run Chapter 4 first to create: models_saved/tf/OM.h5"
-        )
+        error_msg = "Teacher model OM not found. Run Chapter 4 first to create: models_saved/tf/OM.h5"
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
     
-    # Load data
-    print("Loading Opportunity dataset splits...")
-    X_train, y_train, X_val, y_val, X_test, y_test = load_opportunity_splits()
-    
-    # Add channel dimension
-    X_train = np.expand_dims(X_train, -1)
-    X_val = np.expand_dims(X_val, -1)
-    X_test = np.expand_dims(X_test, -1)
-    
-    num_classes = len(np.unique(y_train))
-    input_shape = X_train.shape[1:]
-    
-    print(f"Data shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
-    print(f"Number of classes: {num_classes}")
-    print()
+    # Load and prepare data
+    X_train, y_train, X_val, y_val, X_test, y_test, input_shape, num_classes = load_and_prepare_opportunity_data(logger)
     
     # Load teacher (loaded once, reused for all experiments)
-    print("Loading teacher model (OM)...")
+    logger.info("Loading teacher model (OM)...")
     teacher = load_model_tf(tf_name("OM"))
-    print("✓ Teacher model loaded")
-    print()
+    logger.info("✓ Teacher model loaded")
     
     # Create results directory
     os.makedirs("results", exist_ok=True)
     csv_path = "results/grid_search_rbkd.csv"
     
-    print(f"Starting grid search: {total_experiments} experiments")
-    print(f"Results will be saved to: {csv_path}")
-    print()
+    logger.info(f"Starting grid search: {total_experiments} experiments")
+    logger.info(f"Results will be saved to: {csv_path}")
     
     experiment_count = 0
     
@@ -159,13 +133,13 @@ def main():
             alpha=alpha,
         )
         
-        print(f"  [{experiment_count}/{total_experiments}] {model_name}...", end=" ", flush=True)
+        logger.info(f"[{experiment_count}/{total_experiments}] {model_name}...")
         
         model_path = os.path.join(TF_DIR, f"{model_name}.h5")
         
         # Check if already trained
         if os.path.exists(model_path):
-            print("SKIPPED (already exists)")
+            logger.info("SKIPPED (already exists)")
             # Still evaluate and save to CSV
             try:
                 # Load best model and evaluate
@@ -175,6 +149,10 @@ def main():
                 train_acc, train_f1, train_prec, train_rec, train_cm = evaluate_tf_model(student_model, X_train, y_train, use_gpu=USE_GPU_EVALUATE)
                 val_acc, val_f1, val_prec, val_rec, val_cm = evaluate_tf_model(student_model, X_val, y_val, use_gpu=USE_GPU_EVALUATE)
                 test_acc, test_f1, test_prec, test_rec, test_cm = evaluate_tf_model(student_model, X_test, y_test, use_gpu=USE_GPU_EVALUATE)
+
+                # Calculate parameter counts
+                from src.grid_search_utils import get_model_param_counts
+                param_total, param_trainable, param_non_trainable = get_model_param_counts(student_model)
 
                 # Save to CSV (training_info not available for skipped models)
                 save_grid_search_result(
@@ -204,7 +182,9 @@ def main():
                     train_confusion_matrix=train_cm,
                     # Model info
                     model_size_kb=get_model_size_kb(model_path),
-                    parameter_count=student_model.count_params(),
+                    parameter_count=param_total,
+                    parameter_count_trainable=param_trainable,
+                    parameter_count_non_trainable=param_non_trainable,
                     device=get_active_device(),
                     # Training info (not available for skipped models)
                     total_epochs=None,
@@ -225,7 +205,7 @@ def main():
                 
                 continue
             except (OSError, IOError, ValueError) as e:
-                print(f"⚠ Corrupted model file detected, will retrain: {e}")
+                logger.warning(f"Corrupted model file detected, will retrain: {e}")
                 os.remove(model_path)
                 # Fall through to training below
         
@@ -279,6 +259,10 @@ def main():
             val_acc, val_f1, val_prec, val_rec, val_cm = evaluate_tf_model(student_model, X_val, y_val, use_gpu=USE_GPU_EVALUATE)
             test_acc, test_f1, test_prec, test_rec, test_cm = evaluate_tf_model(student_model, X_test, y_test, use_gpu=USE_GPU_EVALUATE)
             
+            # Calculate parameter counts
+            from src.grid_search_utils import get_model_param_counts
+            param_total, param_trainable, param_non_trainable = get_model_param_counts(student_model)
+            
             # Save to CSV
             save_grid_search_result(
                 csv_path=csv_path,
@@ -307,7 +291,9 @@ def main():
                 train_confusion_matrix=train_cm,
                 # Model info
                 model_size_kb=get_model_size_kb(model_path),
-                parameter_count=student_model.count_params(),
+                parameter_count=param_total,
+                parameter_count_trainable=param_trainable,
+                parameter_count_non_trainable=param_non_trainable,
                 device=get_active_device(),
                 # Training info
                 total_epochs=training_info.get('total_epochs'),
@@ -322,7 +308,7 @@ def main():
                 patience=training_info.get('patience') or KD_DEFAULT_PATIENCE,
             )
             
-            print(f"✓ Val Acc: {val_acc:.4f}")
+            logger.info(f"✓ Val Acc: {val_acc:.4f}")
             
             # Clear memory after each experiment (keep teacher in memory)
             del student
@@ -331,14 +317,12 @@ def main():
             
             # Periodic cleanup every 20 experiments
             if experiment_count % 20 == 0:
-                print(f"\n  [Memory cleanup] Clearing session...", end=" ", flush=True)
+                logger.info("[Memory cleanup] Clearing session...")
                 cleanup_memory()
-                print("Done")
+                logger.info("Done")
                 
         except Exception as e:
-            print(f"✗ ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"ERROR: {e}", exc_info=True)
             # Clear memory even on error (keep teacher in memory)
             if 'student' in locals():
                 del student
@@ -352,9 +336,9 @@ def main():
     tf.keras.backend.clear_session()
     gc.collect()
     
-    print(f"\n=== Grid Search Complete ===")
-    print(f"Results saved to: {csv_path}")
-    print(f"Models saved to: {TF_DIR}")
+    logger.info("=== Grid Search Complete ===")
+    logger.info(f"Results saved to: {csv_path}")
+    logger.info(f"Models saved to: {TF_DIR}")
 
 
 if __name__ == "__main__":

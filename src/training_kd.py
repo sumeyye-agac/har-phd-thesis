@@ -42,7 +42,9 @@ class StudentModelCheckpoint(Callback):
             self.best = current
             if self.save_best_only:
                 self.model.student.save(self.filepath)
-                print(f"\n[Saved best student model] {self.filepath} (val_accuracy={current:.4f})")
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Saved best student model: {self.filepath} (val_accuracy={current:.4f})")
 
 
 class TrainingInfoCallback(Callback):

@@ -11,6 +11,7 @@ import os
 import zipfile
 from io import BytesIO
 from collections import Counter
+import logging
 
 import numpy as np
 import pickle as cp
@@ -18,6 +19,8 @@ from pandas import Series
 from sklearn.model_selection import train_test_split
 
 from src.config import DATA_RANDOM_STATE
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Paths
@@ -112,12 +115,16 @@ def check_data(dataset):
     data_dir, data_file = os.path.split(dataset)
 
     if (not os.path.isfile(dataset)) and data_file == "OpportunityUCIDataset.zip":
-        import urllib.request
+        import requests
         os.makedirs(data_dir, exist_ok=True)
         url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00226/OpportunityUCIDataset.zip"
-        print("Downloading Opportunity dataset...")
-        urllib.request.urlretrieve(url, dataset)
-        print("Download complete.")
+        logger.info("Downloading Opportunity dataset...")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        with open(dataset, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        logger.info("Download complete.")
 
     return data_dir
 
@@ -158,7 +165,7 @@ def generate_raw_gestures(zip_path, out_name):
     Y = np.empty((0))
 
     zf = zipfile.ZipFile(zip_path)
-    print("Processing .dat files...")
+    logger.info("Processing .dat files...")
 
     for fname in OPPORTUNITY_DATA_FILES:
         try:
@@ -167,13 +174,13 @@ def generate_raw_gestures(zip_path, out_name):
             X = np.vstack([X, x])
             Y = np.concatenate([Y, y])
         except KeyError:
-            print(f"Missing: {fname}")
+            logger.warning(f"Missing: {fname}")
 
     out_path = os.path.join(data_dir, out_name)
     with open(out_path, "wb") as f:
         cp.dump([X, Y], f)
 
-    print("Saved:", out_path)
+    logger.info(f"Saved: {out_path}")
     return out_path
 
 
@@ -278,21 +285,57 @@ def prepare_opportunity_splits():
     with open(PROCESSED_SPLIT_PATH, "wb") as f:
         cp.dump(data, f)
 
-    print("Saved splitted dataset →", PROCESSED_SPLIT_PATH)
-    print("Shapes:",
-          "X_train", data["X_train"].shape, "y_train", data["y_train"].shape,
-          "| X_val", data["X_val"].shape, "y_val", data["y_val"].shape,
-          "| X_test", data["X_test"].shape, "y_test", data["y_test"].shape)
-    print("Classes:", int(np.max(data["y_train"])) + 1)
+    logger.info(f"Saved splitted dataset → {PROCESSED_SPLIT_PATH}")
+    logger.info(f"Shapes: X_train {data['X_train'].shape} y_train {data['y_train'].shape} | "
+                f"X_val {data['X_val'].shape} y_val {data['y_val'].shape} | "
+                f"X_test {data['X_test'].shape} y_test {data['y_test'].shape}")
+    logger.info(f"Classes: {int(np.max(data['y_train'])) + 1}")
 
 
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
 
+def load_and_prepare_opportunity_data(logger=None):
+    """
+    Load Opportunity dataset and prepare for model training.
+    
+    This is a convenience function that loads the dataset, adds channel dimension,
+    and extracts input shape and number of classes. It also logs data information
+    if a logger is provided.
+    
+    Args:
+        logger: Optional logger instance for logging data information
+    
+    Returns:
+        tuple: (X_train, y_train, X_val, y_val, X_test, y_test, input_shape, num_classes)
+            - X_train, y_train, X_val, y_val, X_test, y_test: Preprocessed data splits
+            - input_shape: Shape of input data (without batch dimension)
+            - num_classes: Number of classes in the dataset
+    """
+    if logger:
+        logger.info("Loading Opportunity dataset splits...")
+    
+    X_train, y_train, X_val, y_val, X_test, y_test = load_opportunity_splits()
+    
+    # Add channel dimension
+    X_train = np.expand_dims(X_train, -1)
+    X_val = np.expand_dims(X_val, -1)
+    X_test = np.expand_dims(X_test, -1)
+    
+    input_shape = X_train.shape[1:]
+    num_classes = len(np.unique(y_train))
+    
+    if logger:
+        logger.info(f"Data shapes: Train={X_train.shape}, Val={X_val.shape}, Test={X_test.shape}")
+        logger.info(f"Number of classes: {num_classes}")
+    
+    return X_train, y_train, X_val, y_val, X_test, y_test, input_shape, num_classes
+
+
 def load_opportunity_splits():
     if not os.path.exists(PROCESSED_SPLIT_PATH):
-        print("Splits missing — generating now...")
+        logger.info("Splits missing — generating now...")
         prepare_opportunity_splits()
 
     with open(PROCESSED_SPLIT_PATH, "rb") as f:

@@ -25,7 +25,10 @@ from src.registry import (
     tflite_name,
 )
 from src.config import MODEL_SEED, TRAINING_NP_SEED, COMPRESSION_CP_SPARSITY, COMPRESSION_PDP_SPARSITY
+from src.logger import setup_logger
 
+# Setup logger
+logger = setup_logger(__name__)
 
 # -----------------------------
 # Helpers
@@ -138,60 +141,67 @@ def global_magnitude_prune_inplace(model: tf.keras.Model, sparsity: float, seed:
 # -----------------------------
 
 def main():
+    logger.info("=== Chapter 7: Model Compression (TFLite) ===")
+    
     # Safety: OM must exist
     if not exists_tf("OM"):
-        raise FileNotFoundError(
-            "OM.h5 not found. Run Chapter 4 first to create models_saved/tf/OM.h5"
-        )
+        error_msg = "OM.h5 not found. Run Chapter 4 first to create models_saved/tf/OM.h5"
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
 
-    print("[Chapter 7] Loading OM ...")
+    logger.info("Loading OM model...")
     om = load_model_tf(tf_name("OM"))
 
     # 1) Lite
     if exists_tflite("OM-Lite"):
-        print("[Chapter 7] OM-Lite exists -> skipping:", tflite_name("OM-Lite"))
+        logger.info(f"OM-Lite exists -> skipping: {tflite_name('OM-Lite')}")
     else:
-        print("[Chapter 7] Converting OM-Lite ...")
+        logger.info("Converting OM-Lite (plain TFLite)...")
         tflite_bytes = convert_lite(om)
         save_model_tflite(tflite_bytes, tflite_name("OM-Lite"))
+        logger.info("✓ OM-Lite converted successfully")
 
     # 2) DRQ
     if exists_tflite("OM-DRQ"):
-        print("[Chapter 7] OM-DRQ exists -> skipping:", tflite_name("OM-DRQ"))
+        logger.info(f"OM-DRQ exists -> skipping: {tflite_name('OM-DRQ')}")
     else:
-        print("[Chapter 7] Converting OM-DRQ (Dynamic Range Quantization) ...")
+        logger.info("Converting OM-DRQ (Dynamic Range Quantization)...")
         tflite_bytes = convert_drq(om)
         save_model_tflite(tflite_bytes, tflite_name("OM-DRQ"))
+        logger.info("✓ OM-DRQ converted successfully")
 
     # 3) FQ (float16)
     if exists_tflite("OM-FQ"):
-        print("[Chapter 7] OM-FQ exists -> skipping:", tflite_name("OM-FQ"))
+        logger.info(f"OM-FQ exists -> skipping: {tflite_name('OM-FQ')}")
     else:
-        print("[Chapter 7] Converting OM-FQ (Float16 quantization) ...")
+        logger.info("Converting OM-FQ (Float16 quantization)...")
         tflite_bytes = convert_fq_float16(om)
         save_model_tflite(tflite_bytes, tflite_name("OM-FQ"))
+        logger.info("✓ OM-FQ converted successfully")
 
     # 4) CP (approx. constant pruning @ 50%)
     if exists_tflite("OM-CP"):
-        print("[Chapter 7] OM-CP exists -> skipping:", tflite_name("OM-CP"))
+        logger.info(f"OM-CP exists -> skipping: {tflite_name('OM-CP')}")
     else:
-        print(f"[Chapter 7] Converting OM-CP (Constant Pruning @ {COMPRESSION_CP_SPARSITY*100:.0f}%) ...")
+        logger.info(f"Converting OM-CP (Constant Pruning @ {COMPRESSION_CP_SPARSITY*100:.0f}%)...")
         om_cp = load_model_tf(tf_name("OM"))  # Load fresh copy
         global_magnitude_prune_inplace(om_cp, sparsity=COMPRESSION_CP_SPARSITY, seed=TRAINING_NP_SEED)
         tflite_bytes = convert_lite(om_cp)
         save_model_tflite(tflite_bytes, tflite_name("OM-CP"))
+        logger.info("✓ OM-CP converted successfully")
 
     # 5) PDP (approx. polynomial decay pruning @ 80%)
     if exists_tflite("OM-PDP"):
-        print("[Chapter 7] OM-PDP exists -> skipping:", tflite_name("OM-PDP"))
+        logger.info(f"OM-PDP exists -> skipping: {tflite_name('OM-PDP')}")
     else:
-        print(f"[Chapter 7] Converting OM-PDP (Polynomial Decay Pruning @ {COMPRESSION_PDP_SPARSITY*100:.0f}%) ...")
+        logger.info(f"Converting OM-PDP (Polynomial Decay Pruning @ {COMPRESSION_PDP_SPARSITY*100:.0f}%)...")
         om_pdp = load_model_tf(tf_name("OM"))  # Load fresh copy
         global_magnitude_prune_inplace(om_pdp, sparsity=COMPRESSION_PDP_SPARSITY, seed=TRAINING_NP_SEED)
         tflite_bytes = convert_lite(om_pdp)        
         save_model_tflite(tflite_bytes, tflite_name("OM-PDP"))
+        logger.info("✓ OM-PDP converted successfully")
 
-    print("[Chapter 7] All compression models completed!")
+    logger.info("All compression models completed!")
 
 
 if __name__ == "__main__":

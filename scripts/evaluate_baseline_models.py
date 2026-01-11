@@ -15,6 +15,7 @@ Results saved to: results/baseline_models.csv
 import os
 import csv
 import numpy as np
+import tensorflow as tf
 from datetime import datetime
 
 from src.data_opportunity import load_opportunity_splits
@@ -22,27 +23,27 @@ from src.evaluation_tf import evaluate_tf_model
 from src.model_io import load_model_tf
 from src.registry import exists_tf, tf_name, tf_path
 from src.utils_resources import get_model_size as get_model_size_kb
-from src.grid_search_utils import STANDARD_CSV_FIELDNAMES, get_active_device, confusion_matrix_to_string
+from src.grid_search_utils import STANDARD_CSV_FIELDNAMES, get_active_device, confusion_matrix_to_string, extract_model_metadata, get_training_info_from_grid_search_csvs
+from src.logger import setup_logger
 
+# Setup logger
+logger = setup_logger(__name__)
 
 
 def evaluate_baseline_model(model_key: str, csv_path: str):
     """Evaluate a single baseline model and save to CSV using STANDARD_CSV_FIELDNAMES."""
     if not exists_tf(model_key):
-        print(f"  ⚠ {model_key}: Model not found, skipping")
+        logger.warning(f"{model_key}: Model not found, skipping")
         return
     
-    print(f"  Evaluating {model_key}...", end=" ", flush=True)
+    logger.info(f"Evaluating {model_key}...")
     
     # Load model
     model = load_model_tf(tf_name(model_key))
     model_path = tf_path(model_key)
     
-    # Load data
-    X_train, y_train, X_val, y_val, X_test, y_test = load_opportunity_splits()
-    X_train = np.expand_dims(X_train, -1)
-    X_val = np.expand_dims(X_val, -1)
-    X_test = np.expand_dims(X_test, -1)
+    # Load and prepare data
+    X_train, y_train, X_val, y_val, X_test, y_test, _, _ = load_and_prepare_opportunity_data(logger)
     
     # Evaluate - get confusion matrices
     train_acc, train_f1, train_prec, train_rec, train_cm = evaluate_tf_model(model, X_train, y_train)
@@ -50,22 +51,49 @@ def evaluate_baseline_model(model_key: str, csv_path: str):
     test_acc, test_f1, test_prec, test_rec, test_cm = evaluate_tf_model(model, X_test, y_test)
     
     # Save to CSV using STANDARD_CSV_FIELDNAMES
-    timestamp = datetime.now().strftime("%d %m %Y, %H:%M:%S")
+    timestamp = datetime.now().strftime("%d-%m-%Y, %H:%M:%S")
     device = get_active_device()
     
-    # Determine variant from model_key
-    variant = model_key  # OM, LM, or MM
+    # Extract metadata using centralized function
+    metadata = extract_model_metadata(model_key)
+    
+    # Get training info from grid search CSV files (best_epoch, total_epochs)
+    # Note: Baseline models (OM, LM, MM) may not be in grid search CSVs,
+    # but we check anyway in case they were trained via grid search
+    training_info = get_training_info_from_grid_search_csvs(model_key)
+    
+    # Get model size for efficiency calculations
+    model_size_kb = get_model_size_kb(model_path)
+    model_size_mb = model_size_kb / 1024.0
+    
+    # Calculate efficiency metrics
+    if model_size_mb > 0:
+        accuracy_per_mb = f"{test_acc / model_size_mb:.6f}"
+        f1_per_mb = f"{test_f1 / model_size_mb:.6f}"
+    else:
+        accuracy_per_mb = 'N/A'
+        f1_per_mb = 'N/A'
     
     row = {
         'model_name': model_key,
         'timestamp': timestamp,
         'device': device,
-        'variant': variant,
-        'has_attention': 'False',
-        'has_kd': 'False',
-        'kd_type': 'N/A',
-        'model_size_kb': f"{get_model_size_kb(model_path):.2f}",
+        'variant': metadata['variant'],
+        'has_attention': str(metadata['has_attention']),
+        'has_kd': str(metadata['has_kd']),
+        'kd_type': metadata['kd_type'] or 'N/A',
+        'attention_type': metadata.get('attention_type', 'N/A'),
+        'compression_type': metadata.get('compression_type', 'N/A'),
+        'compression_sparsity': metadata.get('compression_sparsity', 'N/A'),
+        'quantization_type': metadata.get('quantization_type', 'N/A'),
+        'best_epoch': training_info.get('best_epoch') or None,
+        'total_epochs': training_info.get('total_epochs') or None,
+        'model_size_kb': f"{model_size_kb:.2f}",
         'parameter_count': str(model.count_params()),
+        'parameter_count_trainable': str(sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])),
+        'parameter_count_non_trainable': str(model.count_params() - sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])),
+        'accuracy_per_mb': accuracy_per_mb,
+        'f1_per_mb': f1_per_mb,
         # Train metrics
         'train_accuracy': f"{train_acc:.6f}",
         'train_f1': f"{train_f1:.6f}",
@@ -88,12 +116,8 @@ def evaluate_baseline_model(model_key: str, csv_path: str):
     
     file_exists = os.path.exists(csv_path)
     
-    # Use STANDARD_CSV_FIELDNAMES as base
+    # Use STANDARD_CSV_FIELDNAMES as base (already includes model_type)
     fieldnames = list(STANDARD_CSV_FIELDNAMES)
-    
-    # Add 'model_type' if not in standard (for baseline models)
-    if 'model_type' not in fieldnames:
-        fieldnames.append('model_type')
     
     # Read existing rows if file exists
     rows = []
@@ -126,13 +150,12 @@ def evaluate_baseline_model(model_key: str, csv_path: str):
         writer.writeheader()
         writer.writerows(rows)
     
-    print(f"✓ (Val Acc: {val_acc:.4f})")
+    logger.info(f"✓ (Val Acc: {val_acc:.4f})")
 
 
 def main():
-    print("=== Baseline Models Evaluation ===")
-    print("Evaluating baseline models (no attention)")
-    print()
+    logger.info("=== Baseline Models Evaluation ===")
+    logger.info("Evaluating baseline models (no attention)")
     
     # Baseline models (without attention)
     baseline_models = [
@@ -144,17 +167,16 @@ def main():
     os.makedirs("results", exist_ok=True)
     csv_path = "results/baseline_models.csv"
     
-    print(f"Evaluating {len(baseline_models)} baseline models...")
-    print(f"Results will be saved to: {csv_path}")
-    print()
+    logger.info(f"Evaluating {len(baseline_models)} baseline models...")
+    logger.info(f"Results will be saved to: {csv_path}")
     
     for model_key in baseline_models:
         evaluate_baseline_model(model_key, csv_path)
     
-    print(f"\n=== Done ===")
-    print(f"Results saved to: {csv_path}")
-    print("\nNote: Attention models are evaluated via grid search.")
-    print("Best attention models are selected via scripts/select_best_models.py")
+    logger.info("=== Done ===")
+    logger.info(f"Results saved to: {csv_path}")
+    logger.info("Note: Attention models are evaluated via grid search.")
+    logger.info("Best attention models are selected via scripts/select_best_models.py")
 
 
 if __name__ == "__main__":
