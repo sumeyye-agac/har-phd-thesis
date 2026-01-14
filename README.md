@@ -15,6 +15,8 @@
 
 This repository provides a chapter-by-chapter reference implementation of a PhD thesis on improving lightweight human activity recognition models for edge devices using attention mechanisms, knowledge distillation, and model compression.
 
+![Efficient HAR pipeline](assets/efficient_har_edge_pipeline.png)
+
 **Current Implementation:**
 - ✅ DeepConvLSTM architecture (OM, LM, MM variants)
 - ✅ Opportunity dataset
